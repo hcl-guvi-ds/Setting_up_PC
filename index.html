@@ -1,0 +1,1243 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video SCORM</title>
+  <script type="text/javascript" src="APISCORM.js"></script>
+  <script type="text/javascript" src="heygen-scorm-wrapper.js"></script>
+  <!-- Packaged draft + segment metadata before scorm-video-config.js (HeyGen mode) -->
+<script type="text/javascript" src="draft.js"></script>
+<script type="text/javascript" src="segment_metadata.js"></script>
+
+  
+  <script type="text/javascript" src="scorm-video-config.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    .controls-container {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      z-index: 1000;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      opacity: 1;
+      transition: opacity 0.3s ease;
+      pointer-events: auto;
+    }
+
+    .controls-container.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .controls-container select {
+      padding: 8px 12px;
+      font-size: 14px;
+      border: 2px solid #333;
+      border-radius: 4px;
+      background-color: white;
+      cursor: pointer;
+    }
+
+    .controls-container label {
+      font-size: 14px;
+      font-weight: 500;
+      color: #333;
+      background-color: rgba(255, 255, 255, 0.9);
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+
+    video {
+      width: 100%;
+      height: auto;
+      max-width: 100vw;
+      max-height: 100vh;
+      display: block;
+    }
+
+    /* Disable seeking when video is not skippable */
+    video.no-skip::-webkit-media-controls-timeline,
+    video.no-skip::-webkit-media-controls-seek-back-button,
+    video.no-skip::-webkit-media-controls-seek-forward-button {
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    video.no-skip::-moz-media-controls-timeline,
+    video.no-skip::-moz-media-controls-seek-back-button,
+    video.no-skip::-moz-media-controls-seek-forward-button {
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    /* Video container - wraps video without changing its natural size */
+    #videoContainer {
+      position: relative;
+      /* Container auto-sizes to video dimensions */
+      width: fit-content;
+      max-width: 100vw;
+      margin: 0 auto;
+      /* Center the video container */
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    button {
+      font-family: inherit;
+      font-feature-settings: inherit;
+      font-variation-settings: inherit;
+      font-size: 100%;
+      font-weight: inherit;
+      line-height: inherit;
+      letter-spacing: inherit;
+      color: inherit;
+      margin: 0;
+      padding: 0;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="controls-container">
+    <label for="languageSelect">Language:</label>
+    <select id="languageSelect">
+      <!-- Options will be dynamically populated -->
+    </select>
+    
+    <label for="speedSelect">Speed:</label>
+    <select id="speedSelect">
+      <!-- Options will be dynamically populated -->
+    </select>
+  </div>
+
+  <div id="videoContainer">
+    <video id="miVideo" controls playsinline controlslist="nofullscreen">
+      <source id="videoSource" src="https://resource2.heygen.ai/aws_pacific/avatar_tmp/6d88f4bf84fa43d5879291f8cc0b673b/vReZcjoX4OV7O0hdopjATfJCZG98kTHk7/caption_643e6fca7b6e431c87b0af2cc40bc1d0.mp4" type="video/mp4">
+      Your browser does not support HTML5 videos.
+    </video>
+  </div>
+
+  <script>
+    // Language configuration, to be injected by backend when exporting
+    var LANGUAGE_CONFIG = {"defaultLanguage": "default", "languages": [{"code": "default", "label": "default", "videoFile": "https://resource2.heygen.ai/aws_pacific/avatar_tmp/6d88f4bf84fa43d5879291f8cc0b673b/vReZcjoX4OV7O0hdopjATfJCZG98kTHk7/caption_643e6fca7b6e431c87b0af2cc40bc1d0.mp4"}]};
+
+    // Playback speed configuration
+    var SPEED_CONFIG = {"defaultSpeed": 1.0, "speeds": [{"value": 0.5, "label": "0.5x"}, {"value": 0.75, "label": "0.75x"}, {"value": 1.0, "label": "Normal"}, {"value": 1.25, "label": "1.25x"}, {"value": 1.5, "label": "1.5x"}, {"value": 1.75, "label": "1.75x"}, {"value": 2.0, "label": "2x"}]};
+
+    // Video control configuration
+    var VIDEO_CONFIG = {"skippable": true};
+
+    // Best-effort runtime refresh (fallback keeps packaged values).
+    var runtimeFetchPromise = Promise.resolve(false);
+    if (typeof window.fetchScormRuntimeData === 'function') {
+      runtimeFetchPromise = window.fetchScormRuntimeData();
+    }
+
+    // Get DOM elements
+    var video = document.getElementById('miVideo');
+    var languageSelect = document.getElementById('languageSelect');
+    var speedSelect = document.getElementById('speedSelect');
+    var scorm = pipwerks.SCORM;
+
+    // Try to initialize SCORM (language system doesn't depend on it)
+    var scormInitialized = false;
+    try {
+      scormInitialized = scorm.init();
+      if (!scormInitialized) {
+        console.warn('[SCORM] Initialization failed - No LMS detected (API not found). Content will run in standalone mode.');
+      } else {
+        console.log('[SCORM] Successfully initialized, version:', scorm.version);
+      }
+    } catch (error) {
+      console.error('[SCORM] Initialization error:', error);
+      console.error('[SCORM] Stack trace:', error.stack);
+    }
+
+    // Initialize language manager after runtime fetch to avoid
+    // overriding refreshed URLs with packaged defaults.
+    runtimeFetchPromise.finally(function() {
+      heygenScormWrapper.init(video, languageSelect, scormInitialized ? scorm : null, LANGUAGE_CONFIG);
+    });
+    
+    // Initialize playback speed control
+    heygenScormWrapper.initPlaybackSpeed(video, speedSelect, scormInitialized ? scorm : null, SPEED_CONFIG);
+
+    // Initialize volume control (syncs with native video controls only)
+    heygenScormWrapper.initVolumeControl(video, scormInitialized ? scorm : null);
+
+    // Initialize video progress tracking (save every 5 seconds)
+    // For interactive videos, this will be called after DRAFT_DATA is loaded
+    var LESSON_ID = 'scorm_643e6fca7b6e431c87b0af2cc40bc1d0';
+    
+    // Store these for later use
+    window.progressTrackingConfig = {
+      lessonId: LESSON_ID,
+      scormAPI: scormInitialized ? scorm : null,
+      saveInterval: 5
+    };
+    
+    // For non-interactive videos, initialize after a short delay
+    // (to give interactive_scripts.html a chance to load if present)
+    setTimeout(function() {
+      // Only initialize if not already done by interactive_scripts.html
+      if (!window.progressTrackingInitialized) {
+        console.log('[PROGRESS] Initializing for non-interactive video');
+        heygenScormWrapper.initProgressTracking(
+          video,
+          window.progressTrackingConfig.scormAPI,
+          window.progressTrackingConfig.saveInterval,
+          window.progressTrackingConfig.lessonId
+        );
+      }
+    }, 100);
+
+    // Setup video skip control for non-interactive videos
+    // Interactive videos will remove this listener after DRAFT_DATA loads
+    if (!VIDEO_CONFIG.skippable) {
+      video.classList.add('no-skip');
+      
+      // Prevent seeking programmatically (keyboard shortcuts, etc.)
+      var savedTime = heygenScormWrapper.loadCurrentTime(scormInitialized ? scorm : null);
+      var maxWatchedTime = savedTime || 0;
+      
+      video.addEventListener('timeupdate', function() {
+        if (video.currentTime > maxWatchedTime) {
+          maxWatchedTime = video.currentTime;
+        }
+      });
+      
+      var seekingListener = function() {
+        var seekingForward = video.currentTime > maxWatchedTime;
+        
+        if (seekingForward) {
+          console.log('[SEEK] No-skip prevention - limiting to:', maxWatchedTime, 'was trying:', video.currentTime);
+          video.currentTime = maxWatchedTime;
+        }
+      };
+      
+      video.addEventListener('seeking', seekingListener);
+      
+      // Store listener reference so interactive videos can remove it
+      window.noSkipSeekingListener = seekingListener;
+      
+      console.log('Video skip control: Skipping disabled');
+    } else {
+      console.log('Video skip control: Skipping allowed');
+    }
+
+    // Setup auto-hide controls
+    var controlsContainer = document.querySelector('.controls-container');
+    var hideTimeout;
+    var HIDE_DELAY = 2000; // 2 seconds
+
+    function showControls() {
+      controlsContainer.classList.remove('hidden');
+      
+      // Clear existing timeout
+      if (hideTimeout) {
+        clearTimeout(hideTimeout);
+      }
+      
+      // Set new timeout to hide controls
+      hideTimeout = setTimeout(function() {
+        controlsContainer.classList.add('hidden');
+      }, HIDE_DELAY);
+    }
+
+    function hideControlsImmediately() {
+      if (hideTimeout) {
+        clearTimeout(hideTimeout);
+      }
+      controlsContainer.classList.add('hidden');
+    }
+
+    // Show controls on mouse move over the video container
+    document.body.addEventListener('mousemove', showControls);
+    
+    // Keep controls visible when hovering over them
+    controlsContainer.addEventListener('mouseenter', function() {
+      if (hideTimeout) {
+        clearTimeout(hideTimeout);
+      }
+    });
+    
+    // Resume auto-hide when mouse leaves controls
+    controlsContainer.addEventListener('mouseleave', function() {
+      hideTimeout = setTimeout(function() {
+        controlsContainer.classList.add('hidden');
+      }, HIDE_DELAY);
+    });
+
+    // Show controls initially, then start auto-hide
+    showControls();
+
+    // SCORM-specific logic (video progress tracking)
+    if (scormInitialized) {
+      var completado = false;
+      var mastery_score = 100 / 100;
+      var unloaded = false;
+
+      // Detect SCORM version for proper data model usage
+      var isScorm2004 = scorm.version === "2004";
+      console.log('SCORM version detected:', scorm.version);
+
+      video.addEventListener('timeupdate', function () {
+        if (!completado && video.currentTime / video.duration >= mastery_score) {
+          if (isScorm2004) {
+            // SCORM 2004: Use completion_status and success_status
+            scorm.set("cmi.completion_status", "completed");
+            scorm.set("cmi.success_status", "passed");
+            scorm.set("cmi.score.raw", 100);
+            scorm.set("cmi.exit", "suspend");
+          } else {
+            // SCORM 1.2: Use lesson_status
+            scorm.set("cmi.core.lesson_status", "passed");
+            scorm.set("cmi.core.score.raw", 100);
+            scorm.set("cmi.core.exit", "suspend");
+          }
+          scorm.save();
+          completado = true;
+          console.log('Video completion threshold reached - marked as completed');
+        }
+      });
+
+      video.addEventListener('ended', function () {
+        if (!completado) {
+          if (isScorm2004) {
+            // SCORM 2004
+            scorm.set("cmi.completion_status", "completed");
+            scorm.set("cmi.success_status", "failed");
+            scorm.set("cmi.score.raw", 0);
+            scorm.set("cmi.exit", "suspend");
+          } else {
+            // SCORM 1.2
+            scorm.set("cmi.core.lesson_status", "failed");
+            scorm.set("cmi.core.score.raw", 0);
+            scorm.set("cmi.core.exit", "suspend");
+          }
+          scorm.save();
+          scorm.quit();
+          completado = true;
+          console.log('Video ended without reaching mastery score - marked as failed');
+        }
+      });
+
+      window.addEventListener('beforeunload', function (e) {
+        if (!unloaded) {
+          if (isScorm2004) {
+            // SCORM 2004
+            if (completado) {
+              scorm.set("cmi.completion_status", "completed");
+              scorm.set("cmi.success_status", "passed");
+              scorm.set("cmi.score.raw", 100);
+            } else {
+              scorm.set("cmi.completion_status", "incomplete");
+              scorm.set("cmi.success_status", "unknown");
+              scorm.set("cmi.score.raw", 0);
+            }
+            scorm.set("cmi.exit", "suspend");
+          } else {
+            // SCORM 1.2
+            var lessonStatus = completado ? "passed" : "incomplete";
+            scorm.set("cmi.core.lesson_status", lessonStatus);
+            scorm.set("cmi.core.score.raw", completado ? 100 : 0);
+            scorm.set("cmi.core.exit", "suspend");
+          }
+          scorm.save();
+          scorm.quit();
+          unloaded = true;
+          console.log('Page unload - SCORM session terminated');
+        }
+      });
+    } else {
+      console.log('[SCORM] Running in standalone mode (no LMS). All interactive features are available.');
+    }
+  </script>
+  <!-- draft.js + segment_metadata.js load from index.html <head> (before scorm-video-config.js). -->
+
+<script>
+  // Packaged draft.js has run; fetchScormRuntimeData (body + below) may still overwrite DRAFT_DATA /
+  // SEGMENT_METADATA. Keep this flag synchronous so the main template's 100ms progress fallback does
+  // not race initProgressTracking — do not defer until after the API without changing index.html.
+  window.DRAFT_DATA_LOADED = true;
+  console.log('[INTERACTIVE] Interactive video detected - skipping progress restoration');
+  
+  // For interactive videos: Keep no-skip class (blocks manual seeking)
+  // But allow SDK seeks by setting flag before each seek
+  console.log('[INTERACTIVE] No-skip remains active - only SDK can seek');
+  
+  // NOW initialize progress tracking AFTER DRAFT_DATA is loaded
+  // This ensures the isInteractive check works correctly
+  if (window.progressTrackingConfig) {
+    var video = document.getElementById('miVideo');
+    heygenScormWrapper.initProgressTracking(
+      video,
+      window.progressTrackingConfig.scormAPI,
+      window.progressTrackingConfig.saveInterval,
+      window.progressTrackingConfig.lessonId
+    );
+    window.progressTrackingInitialized = true;  // Mark as done
+  }
+</script>
+
+<script type="text/javascript" src="react.production.min.js"></script>
+<script type="text/javascript" src="react-dom.production.min.js"></script>
+<script type="text/javascript" src="interactive-video.umd.js"></script>
+
+<script>
+  // Interactive Video initialization - clean version without interference
+  (function() {
+    var initializeInteractiveVideo = async function() {
+      if (window.DRAFT_DATA && window.InteractiveVideo) {
+        try {
+          console.log('[INTERACTIVE] Initializing Interactive Video SDK...');
+          console.log('[INTERACTIVE] Draft data present:', !!window.DRAFT_DATA);
+          console.log('[INTERACTIVE] Segment metadata present:', !!window.SEGMENT_METADATA);
+          console.log('[INTERACTIVE] Segments count:', window.SEGMENT_METADATA ? window.SEGMENT_METADATA.length : 0);
+          
+          var video = document.getElementById('miVideo');
+          const segments = window.SEGMENT_METADATA;
+          
+          // Remove no-skip seeking listener for interactive videos
+          // SDK will handle all seeking
+          if (window.noSkipSeekingListener) {
+            video.removeEventListener('seeking', window.noSkipSeekingListener);
+            console.log('[INTERACTIVE] Removed no-skip listener - SDK controls seeking');
+          }
+          
+          var resumeState = heygenScormWrapper.getInteractiveResumeState(
+            window.progressTrackingConfig ? window.progressTrackingConfig.scormAPI : null
+          );
+          var firstSegmentId = segments && segments.length > 0 ? segments[0].segmentId : null;
+
+          // Reopen branching videos from the root segment on reload.
+          var currentSegmentId = firstSegmentId || resumeState.segmentId || null;
+          var initialResumeTime =
+            currentSegmentId && resumeState.segmentId === currentSegmentId
+              ? (resumeState.checkpointTime || 0)
+              : 0;
+          window.currentSegmentId = currentSegmentId;
+
+          // Suppress saves while the SDK is switching the video source after a
+          // branch/jump. Between the callback and the actual src swap, timeupdate
+          // still fires with the OLD segment's currentTime — saving it under the
+          // NEW segment ID corrupts the checkpoint.
+          function beginSegmentSwitch(newSegmentId, reason) {
+            if (newSegmentId === currentSegmentId) return;
+            window.previousSegmentId = currentSegmentId;
+            window.segmentSwitchInProgress = true;
+            currentSegmentId = newSegmentId;
+            window.currentSegmentId = newSegmentId;
+            console.log('[PROGRESS] Segment switch started: ' + newSegmentId + ' (' + reason + ')');
+
+            var srcAtSwitch = video.src || '';
+            var cleared = false;
+            var clearSwitch = function() {
+              if (cleared) return;
+              cleared = true;
+              window.segmentSwitchInProgress = false;
+              console.log('[PROGRESS] Segment switch complete, saves re-enabled');
+            };
+            var onLoaded = function() {
+              if ((video.src || '') !== srcAtSwitch) {
+                video.removeEventListener('loadeddata', onLoaded);
+                clearTimeout(fallback);
+                // Let currentTime settle after src swap
+                setTimeout(clearSwitch, 200);
+              }
+            };
+            // Fallback in case src swap is instant or never fires loadeddata
+            var fallback = setTimeout(function() {
+              video.removeEventListener('loadeddata', onLoaded);
+              clearSwitch();
+            }, 2000);
+            video.addEventListener('loadeddata', onLoaded);
+          }
+
+          // Track which DRAFT_DATA element keys have already been matched to a
+          // quiz submit event, so duplicate-option quizzes get distinct IDs.
+          var matchedQuizElKeys = {};
+          var quizFallbackCounter = 0;
+
+          const interactivePlayer = await InteractiveVideo.create({
+            container: '#videoContainer',
+            video: {
+              element: '#miVideo'
+            },
+            draft: window.DRAFT_DATA,
+            segments: segments,
+            initialSegmentId: currentSegmentId,
+            width: window.DRAFT_DATA.video_output.resolution.width || 1920,
+            height: window.DRAFT_DATA.video_output.resolution.height || 1080,
+            
+            onBranch: function(branchId) {
+              console.log('[INTERACTIVE] Branch triggered:', branchId);
+              beginSegmentSwitch(branchId, 'branch');
+
+              // Clear pause state when user makes a choice
+              if (window.sceneBoundaryPauseData) {
+                window.sceneBoundaryPauseData.clearPauseState('branch selection');
+              }
+            },
+            onJumpToScene: function(sceneId) {
+              console.log('[INTERACTIVE] Jump to scene:', sceneId);
+
+              // Find which segment this scene belongs to
+              if (segments) {
+                for (var i = 0; i < segments.length; i++) {
+                  if (segments[i].sceneIds.indexOf(sceneId) !== -1) {
+                    beginSegmentSwitch(segments[i].segmentId, 'scene jump');
+                    break;
+                  }
+                }
+              }
+
+              // Clear pause state when user jumps to scene
+              if (window.sceneBoundaryPauseData) {
+                window.sceneBoundaryPauseData.clearPauseState('scene jump');
+              }
+            },
+            onReady: function(instance) {
+              console.log('[INTERACTIVE] SDK Ready');
+              window.interactiveVideoReady = true;
+              window.interactivePlayer = instance;
+              window.currentSegmentId = currentSegmentId;
+
+              // SDK React effects can run after onReady and set video.src to a stale segment URL
+              // while fetch/init already set #videoSource — playback follows video.src. On the
+              // primary segment, realign video to #videoSource (two delays catch late effects).
+              var syncPrimarySegmentVideoWithSource = function() {
+                var sourceEl = document.getElementById('videoSource');
+                if (!sourceEl || !video) return;
+                var want = (sourceEl.src || '').split('#')[0];
+                var have = (video.currentSrc || video.src || '').split('#')[0];
+                if (!want || !have || want === have) return;
+                var onPrimarySegment =
+                  !segments ||
+                  segments.length === 0 ||
+                  segments.length === 1 ||
+                  (segments[0] && currentSegmentId === segments[0].segmentId);
+                if (!onPrimarySegment) return;
+                var canonical = (window.__SCORM_RUNTIME_VIDEO_URL || '').split('#')[0];
+                if (canonical && want !== canonical) return;
+                console.warn('[INTERACTIVE] video.src out of sync with #videoSource; correcting');
+                video.src = want;
+                if (typeof video.load === 'function') video.load();
+              };
+              // onReady runs before the SDK's React useEffect that sets video.src; wait for that.
+              setTimeout(syncPrimarySegmentVideoWithSource, 400);
+
+              if (currentSegmentId && initialResumeTime > 0) {
+                var resumeApplied = false;
+                // Suppress checkpoint saves until the resume seek completes.
+                // Without this, timeupdate fires with currentTime=0 when the SDK
+                // swaps video.src for non-first segments, overwriting the saved
+                // checkpoint and causing resume to always start from 0.
+                window.resumeInProgress = true;
+
+                var applyResumeCheckpoint = function() {
+                  if (resumeApplied) {
+                    return;
+                  }
+
+                  resumeApplied = true;
+                  console.log(
+                    '[SEEK] Restoring interactive resume checkpoint:',
+                    currentSegmentId,
+                    initialResumeTime
+                  );
+                  video.currentTime = initialResumeTime;
+
+                  // Allow saves again after the seek settles
+                  setTimeout(function() {
+                    window.resumeInProgress = false;
+                    console.log('[SEEK] Resume complete, checkpoint saves re-enabled');
+                  }, 500);
+                };
+
+                var isFirstSegment = segments && segments.length > 0 &&
+                  currentSegmentId === segments[0].segmentId;
+
+                if (isFirstSegment) {
+                  // First segment — video src is already correct from the HTML <video> tag
+                  if (video.readyState >= 1) {
+                    applyResumeCheckpoint();
+                  } else {
+                    video.addEventListener('loadedmetadata', applyResumeCheckpoint, { once: true });
+                  }
+                } else {
+                  // Non-first segment — the SDK swaps video.src in a React useEffect
+                  // that runs AFTER onReady returns. We must wait for the new source
+                  // to load before setting currentTime, otherwise the src change
+                  // resets it to 0.
+                  var originalSrc = video.src || '';
+                  var resumeFallbackTimer = setTimeout(function() {
+                    video.removeEventListener('canplay', onResumeCanPlay);
+                    if (!resumeApplied) {
+                      console.warn('[SEEK] Resume fallback: seeking after timeout');
+                      applyResumeCheckpoint();
+                    }
+                  }, 5000);
+                  var onResumeCanPlay = function() {
+                    if (resumeApplied) {
+                      video.removeEventListener('canplay', onResumeCanPlay);
+                      return;
+                    }
+                    var newSrc = video.src || '';
+                    if (newSrc !== originalSrc) {
+                      clearTimeout(resumeFallbackTimer);
+                      video.removeEventListener('canplay', onResumeCanPlay);
+                      applyResumeCheckpoint();
+                    }
+                  };
+                  video.addEventListener('canplay', onResumeCanPlay);
+                }
+              }
+              
+              // Track segment completion - DEFINE EARLY before using it
+              var segmentCompletionTracker = {
+                segments: {},  // segmentId -> {duration, completed}
+                lastLoggedProgress: 0
+              };
+              
+              // Calculate and log global progress
+              if (window.interactiveProgress) {
+                // Update enriched segments with current durations
+                var currentEnrichedSegments = segments.map(function(seg) {
+                  return {
+                    segmentId: seg.segmentId,
+                    duration: segmentCompletionTracker.segments[seg.segmentId] ? segmentCompletionTracker.segments[seg.segmentId].duration : 0
+                  };
+                });
+                
+                var progress = heygenScormWrapper.calculateInteractiveProgress(
+                  window.interactiveProgress,
+                  currentEnrichedSegments
+                );
+                console.log('[PROGRESS] Global progress:', progress);
+                console.log('[PROGRESS] Completion: ' + progress.percentage + '%');
+                console.log('[PROGRESS] Segments visited: ' + progress.segmentsVisited + '/' + progress.totalSegments);
+                console.log('[PROGRESS] Completed segments:', progress.completedSegments);
+                window.interactiveGlobalProgress = progress;
+              }
+              
+              // Initialize segments and preload durations from video metadata
+              if (segments) {
+                var durationsLoaded = 0;
+                
+                segments.forEach(function(seg) {
+                  segmentCompletionTracker.segments[seg.segmentId] = {
+                    duration: 0,  // Will be updated from preload
+                    completed: false,
+                    maxWatched: 0
+                  };
+                  
+                  // Create hidden video element to get duration
+                  var hiddenVideo = document.createElement('video');
+                  hiddenVideo.style.display = 'none';
+                  hiddenVideo.preload = 'metadata';  // Only load metadata, not full video
+                  hiddenVideo.src = seg.videoUrl;
+                  
+                  hiddenVideo.addEventListener('loadedmetadata', function() {
+                    segmentCompletionTracker.segments[seg.segmentId].duration = hiddenVideo.duration;
+                    console.log('[PROGRESS] Preloaded duration for ' + seg.segmentId + ': ' + hiddenVideo.duration.toFixed(2) + 's');
+                    
+                    durationsLoaded++;
+                    
+                    // Clean up: remove hidden video after getting duration
+                    document.body.removeChild(hiddenVideo);
+                    
+                    // Log when all durations are loaded
+                    if (durationsLoaded === segments.length) {
+                      var totalDuration = Object.keys(segmentCompletionTracker.segments).reduce(function(sum, id) {
+                        return sum + segmentCompletionTracker.segments[id].duration;
+                      }, 0);
+                      console.log('[PROGRESS] All segment durations loaded. Total: ' + totalDuration.toFixed(2) + 's across ' + segments.length + ' segments');
+                      
+                      // Calculate and store progress now that we have all durations
+                      if (window.interactiveProgress) {
+                        var currentEnrichedSegments = segments.map(function(seg) {
+                          return {
+                            segmentId: seg.segmentId,
+                            duration: segmentCompletionTracker.segments[seg.segmentId] ? segmentCompletionTracker.segments[seg.segmentId].duration : 0
+                          };
+                        });
+                        
+                        var initialProgress = heygenScormWrapper.calculateInteractiveProgress(
+                          window.interactiveProgress,
+                          currentEnrichedSegments
+                        );
+                        console.log('[PROGRESS] Initial progress with all durations: ' + initialProgress.percentage + '%');
+                        
+                        // Cache calculated progress
+                        window.interactiveGlobalProgress = initialProgress;
+                        // Only save if not in the middle of a resume seek —
+                        // otherwise video.currentTime is 0 and would overwrite
+                        // the restored checkpoint.
+                        if (window.currentSegmentId && !window.resumeInProgress && !window.segmentSwitchInProgress) {
+                          heygenScormWrapper.saveCurrentTime(
+                            video.currentTime || 0,
+                            null,
+                            window.currentSegmentId,
+                            initialProgress,
+                            heygenScormWrapper.getInteractiveCheckpointTime(
+                              video.currentTime || 0,
+                              window.currentSegmentId
+                            )
+                          );
+                        }
+                      }
+                    }
+                  });
+                  
+                  hiddenVideo.addEventListener('error', function() {
+                    console.warn('[PROGRESS] Failed to load metadata for ' + seg.segmentId);
+                    // Clean up even on error
+                    if (hiddenVideo.parentNode) {
+                      document.body.removeChild(hiddenVideo);
+                    }
+                  });
+                  
+                  document.body.appendChild(hiddenVideo);
+                });
+              }
+              
+              // Setup segment-aware progress saving and completion tracking
+              video.addEventListener('timeupdate', function() {
+                // Don't save while resume seek or segment switch is in progress —
+                // the video src swap causes currentTime from the OLD segment to be
+                // saved under the NEW segment ID.
+                if (window.resumeInProgress || window.segmentSwitchInProgress) return;
+
+                if (window.currentSegmentId && heygenScormWrapper) {
+                  var currentTime = video.currentTime;
+                  var segmentId = window.currentSegmentId;
+                  var checkpointTime = heygenScormWrapper.getInteractiveCheckpointTime(
+                    currentTime,
+                    segmentId
+                  );
+                  
+                  // Save with cached progress (no recalculation needed)
+                  var cachedProgress = window.interactiveGlobalProgress;
+                  heygenScormWrapper.saveCurrentTime(
+                    currentTime,
+                    null,
+                    segmentId,
+                    cachedProgress,
+                    checkpointTime
+                  );
+                  
+                  // Track segment completion
+                  var segmentInfo = segmentCompletionTracker.segments[segmentId];
+                  if (segmentInfo) {
+                    // Update max watched time for this segment
+                    segmentInfo.maxWatched = Math.max(segmentInfo.maxWatched, currentTime);
+                    
+                    // Check if segment just completed (>90% watched)
+                    // Only check if duration is loaded (> 0)
+                    if (segmentInfo.duration > 0) {
+                      var completionThreshold = segmentInfo.duration * 0.9;
+                      if (!segmentInfo.completed && segmentInfo.maxWatched >= completionThreshold) {
+                        segmentInfo.completed = true;
+                        
+                        // Only recalculate when segment completion changes
+                        var progressData = heygenScormWrapper.loadInteractiveProgress(null);
+                        
+                        // Update enriched segments with current durations
+                        var currentEnrichedSegments = segments.map(function(seg) {
+                          return {
+                            segmentId: seg.segmentId,
+                            duration: segmentCompletionTracker.segments[seg.segmentId] ? segmentCompletionTracker.segments[seg.segmentId].duration : 0
+                          };
+                        });
+                        
+                        // Recalculate only on completion milestone
+                        var newProgress = heygenScormWrapper.calculateInteractiveProgress(progressData, currentEnrichedSegments);
+                        
+                        console.log('%c[PROGRESS] ✅ Segment Completed: ' + segmentId, 'color: green; font-weight: bold');
+                        console.log('[PROGRESS] Segment duration: ' + segmentInfo.duration.toFixed(2) + 's');
+                        console.log('[PROGRESS] Time watched: ' + segmentInfo.maxWatched.toFixed(2) + 's');
+                        console.log('[PROGRESS] Updated completion: ' + newProgress.percentage + '%');
+                        console.log('[PROGRESS] Total completed: ' + newProgress.completedSegments.length + '/' + newProgress.totalSegments);
+                        console.log('[PROGRESS] Completed segments:', newProgress.completedSegments);
+                        
+                        // Cache and immediately save the calculated progress
+                        window.interactiveGlobalProgress = newProgress;
+                        heygenScormWrapper.saveCurrentTime(
+                          currentTime,
+                          null,
+                          segmentId,
+                          newProgress,
+                          checkpointTime
+                        );
+                        
+                        // Log progress updates every 10% increase
+                        if (Math.floor(newProgress.percentage / 10) > segmentCompletionTracker.lastLoggedProgress) {
+                          segmentCompletionTracker.lastLoggedProgress = Math.floor(newProgress.percentage / 10);
+                          console.log('%c[PROGRESS] 📊 ' + newProgress.percentage + '% Complete', 'color: blue; font-weight: bold');
+                          console.log('[PROGRESS] Segments: ' + newProgress.segmentsVisited + '/' + newProgress.totalSegments + ' visited, ' + newProgress.completedSegments.length + ' completed');
+                        }
+                      }
+                    }
+                  }
+                }
+              });
+              
+              // Add scene boundary pause logic for branching
+              setupSceneBoundaryPause(video, window.DRAFT_DATA, segments);
+              
+              // Add ended event listener for final progress summary
+              video.addEventListener('ended', function() {
+                var progressData = heygenScormWrapper.loadInteractiveProgress(null);
+
+                // Update enriched segments with current durations
+                var currentEnrichedSegments = segments.map(function(seg) {
+                  return {
+                    segmentId: seg.segmentId,
+                    duration: segmentCompletionTracker.segments[seg.segmentId] ? segmentCompletionTracker.segments[seg.segmentId].duration : 0
+                  };
+                });
+
+                var finalProgress = heygenScormWrapper.calculateInteractiveProgress(progressData, currentEnrichedSegments);
+
+                console.log('%c[PROGRESS] Video Ended - Final Summary', 'color: purple; font-weight: bold; font-size: 14px');
+                console.log('[PROGRESS] Overall Completion: ' + finalProgress.percentage + '%');
+                console.log('[PROGRESS] Total Time Watched: ' + finalProgress.totalWatchedTime + 's');
+                console.log('[PROGRESS] Segments Visited: ' + finalProgress.segmentsVisited + '/' + finalProgress.totalSegments);
+                console.log('[PROGRESS] Segments Completed: ' + finalProgress.completedSegments.length + '/' + finalProgress.totalSegments);
+                console.log('[PROGRESS] Completed Segments:', finalProgress.completedSegments);
+                console.log('[PROGRESS] Current Segment: ' + progressData.currentSegment);
+
+                // Cache final progress for reference
+                window.finalInteractiveProgress = finalProgress;
+                window.interactiveGlobalProgress = finalProgress;
+
+                // Reset resume point to first segment so the user can pick a
+                // new branch on next visit instead of jumping straight into
+                // the previously chosen branch track.
+                var firstSegmentId = segments && segments.length > 0 ? segments[0].segmentId : null;
+                if (firstSegmentId) {
+                  progressData.currentSegment = firstSegmentId;
+                  progressData.checkpoints[firstSegmentId] = 0;
+                  progressData.calculatedProgress = finalProgress;
+                  var scormAPI = window.progressTrackingConfig ? window.progressTrackingConfig.scormAPI : null;
+                  heygenScormWrapper.saveInteractiveProgress(progressData, scormAPI);
+                  console.log('[PROGRESS] Resume point reset to first segment for fresh branch selection');
+                }
+              });
+            },
+            onError: function(error) {
+              console.error('[INTERACTIVE] SDK Error:', error);
+            },
+            onEvent: function(name, data) {
+              console.log('[INTERACTIVE] SDK Event:', name, data);
+
+              // Fallback: update segment from branching event if onBranch wasn't called
+              if (name === 'INTERACTIVE_BRANCHING_BUTTON_CLICK' && data && data.targetBranchId) {
+                beginSegmentSwitch(data.targetBranchId, 'event fallback');
+              }
+
+              // Clear pause state on any interactive component click
+              if (name === 'INTERACTIVE_BRANCHING_BUTTON_CLICK' ||
+                  name === 'INTERACTIVE_QUIZ_SUBMIT' ||
+                  name === 'INTERACTIVE_LINK_BUTTON_CLICK') {
+                if (window.sceneBoundaryPauseData) {
+                  window.sceneBoundaryPauseData.clearPauseState('interactive click: ' + name);
+                }
+              }
+
+              // Dispatch xAPI interaction event (picked up by xapi-tracker.js).
+              // For branching, onBranch already switched currentSegmentId to the
+              // destination — use previousSegmentId to record where the learner was.
+              if (window.HEYGEN_XAPI_CONFIG && typeof window.HEYGEN_XAPI_CONFIG === 'object') {
+                var sourceSegment = window.previousSegmentId || window.currentSegmentId || '';
+                var xapiDetail = null;
+                if (name === 'INTERACTIVE_BRANCHING_BUTTON_CLICK') {
+                  xapiDetail = { response: (data && data.targetBranchId) || '', interactionType: 'branch', segmentId: sourceSegment };
+                } else if (name === 'INTERACTIVE_QUIZ_SUBMIT' && data) {
+                  // Build enriched quiz answer event for xapi-tracker.js
+                  var opts = data.options || [];
+                  var selected = data.selectedAnswers || [];
+                  var selectedTexts = [];
+                  var selectedIds = [];
+                  var choices = [];
+                  var correctIds = [];
+                  for (var qi = 0; qi < opts.length; qi++) {
+                    var optId = opts[qi].id || String(qi);
+                    choices.push({ id: optId, description: { "en-US": opts[qi].text || "" } });
+                    if (opts[qi].isCorrect) { correctIds.push(optId); }
+                    if (selected.indexOf(qi) !== -1) {
+                      selectedIds.push(optId);
+                      selectedTexts.push(opts[qi].text || "");
+                    }
+                  }
+                  // Match specific quiz element from DRAFT_DATA by comparing options,
+                  // scoped to current segment's scenes for multi-quiz disambiguation.
+                  var questionText = '';
+                  var matchedElKey = '';
+                  if (window.DRAFT_DATA && window.DRAFT_DATA.text_draft && window.DRAFT_DATA.text_draft.visual) {
+                    var allElements = window.DRAFT_DATA.text_draft.visual.elements;
+                    // Build set of element IDs belonging to the current segment's scenes
+                    var segmentElementIds = null;
+                    if (window.SEGMENT_METADATA && window.currentSegmentId) {
+                      for (var si = 0; si < window.SEGMENT_METADATA.length; si++) {
+                        if (window.SEGMENT_METADATA[si].segmentId === window.currentSegmentId) {
+                          segmentElementIds = {};
+                          var sceneIds = window.SEGMENT_METADATA[si].sceneIds || [];
+                          for (var sci = 0; sci < sceneIds.length; sci++) {
+                            var sceneEl = allElements[sceneIds[sci]];
+                            if (sceneEl && sceneEl.content && sceneEl.content.elements) {
+                              for (var cei = 0; cei < sceneEl.content.elements.length; cei++) {
+                                segmentElementIds[sceneEl.content.elements[cei]] = true;
+                              }
+                            }
+                          }
+                          break;
+                        }
+                      }
+                    }
+                    // Collect event option texts for matching against DRAFT_DATA
+                    var eventOptTexts = [];
+                    for (var oi = 0; oi < opts.length; oi++) { eventOptTexts.push(opts[oi].text || ''); }
+                    var fallbackElKey = '';
+                    var fallbackTitle = '';
+                    for (var elKey in allElements) {
+                      if (!allElements.hasOwnProperty(elKey)) { continue; }
+                      if (segmentElementIds && !segmentElementIds[elKey]) { continue; }
+                      // Skip elements already claimed by a previous submit
+                      if (matchedQuizElKeys[elKey]) { continue; }
+                      var el = allElements[elKey];
+                      if (!el || el.type !== 'interactive' || !el.content ||
+                          el.content.component_id !== 'interactive_quiz' ||
+                          !el.content.component_props) { continue; }
+                      var draftOpts = el.content.component_props.options || [];
+                      // Try exact match by option texts
+                      if (draftOpts.length === eventOptTexts.length) {
+                        var allMatch = true;
+                        for (var mi = 0; mi < draftOpts.length; mi++) {
+                          if ((draftOpts[mi].text || '') !== eventOptTexts[mi]) { allMatch = false; break; }
+                        }
+                        if (allMatch) {
+                          questionText = el.content.component_props.title || '';
+                          matchedElKey = elKey;
+                          break;
+                        }
+                      }
+                      // Track first unclaimed quiz as fallback
+                      if (!fallbackElKey && el.content.component_props.title) {
+                        fallbackElKey = elKey;
+                        fallbackTitle = el.content.component_props.title;
+                      }
+                    }
+                    if (!matchedElKey && fallbackElKey) {
+                      matchedElKey = fallbackElKey;
+                      questionText = fallbackTitle;
+                    }
+                  }
+                  // Mark element as claimed so subsequent submits don't reuse it
+                  if (matchedElKey) { matchedQuizElKeys[matchedElKey] = true; }
+                  // Use element key for unique questionId; monotonic counter fallback
+                  var questionId = (window.currentSegmentId || '') + '_' + (matchedElKey || 'quiz_' + (++quizFallbackCounter));
+                  var quizEvt = document.createEvent('CustomEvent');
+                  quizEvt.initCustomEvent('heygen-xapi-quiz-answer', true, true, {
+                    questionId: questionId,
+                    questionText: questionText,
+                    response: selectedIds.join('[,]'),
+                    isCorrect: !!data.hasAnsweredCorrectly,
+                    segmentId: window.currentSegmentId || '',
+                    choices: choices,
+                    correctResponsePattern: correctIds.join('[,]')
+                  });
+                  document.dispatchEvent(quizEvt);
+                  // Also send the legacy interacted event (human-readable text)
+                  xapiDetail = { response: selectedTexts.join(', '), interactionType: 'quiz', segmentId: window.currentSegmentId || '' };
+                } else if (name === 'INTERACTIVE_LINK_BUTTON_CLICK') {
+                  xapiDetail = { response: (data && (data.url || data.label)) || '', interactionType: 'link', segmentId: window.currentSegmentId || '' };
+                }
+                if (xapiDetail) {
+                  var evt = document.createEvent('CustomEvent');
+                  evt.initCustomEvent('heygen-xapi-interact', true, true, xapiDetail);
+                  document.dispatchEvent(evt);
+                }
+              }
+            }
+          });
+
+          window.interactiveVideoInitialized = true;
+          console.log('[INTERACTIVE] Initialization complete');
+        } catch (error) {
+          console.error('[INTERACTIVE] Failed to initialize:', error);
+          console.error('[INTERACTIVE] Error stack:', error.stack);
+          window.interactiveVideoInitialized = false;
+        }
+      } else {
+        console.error('[INTERACTIVE] Cannot initialize - missing dependencies:');
+        if(!window.DRAFT_DATA) console.error('  - DRAFT_DATA is missing');
+        if(!window.InteractiveVideo) console.error('  - InteractiveVideo SDK not loaded');
+        window.interactiveVideoInitialized = false;
+      }
+    };
+    
+    // Setup scene boundary pause for blocking interactive components
+    function setupSceneBoundaryPause(video, draft, segments) {
+      if (!segments || !draft) return;
+      
+      console.log('[SCENE-PAUSE] Setting up scene boundary pause logic');
+      
+      // Calculate scene timeline
+      var converted = window.InteractiveVideo.convertDraftToInteractive(draft, {
+        width: draft.video_output.resolution.width || 1920,
+        height: draft.video_output.resolution.height || 1080
+      });
+      var sceneTimelineMap = converted.sceneTimelineMap;
+      
+      // Find scenes with blocking interactive components
+      var scenesToPause = [];
+      segments.forEach(function(segment) {
+        // Get the segment's global start time for coordinate conversion
+        var segmentGlobalStart = 0;
+        if (segment.sceneIds && segment.sceneIds.length > 0) {
+          var firstSceneId = segment.sceneIds[0];
+          if (sceneTimelineMap[firstSceneId]) {
+            segmentGlobalStart = sceneTimelineMap[firstSceneId].start;
+          }
+        }
+        
+        segment.sceneIds.forEach(function(sceneId, index) {
+          var sceneElement = draft.text_draft.visual.elements[sceneId];
+          if (!sceneElement || sceneElement.type !== 'scene' || !sceneElement.content.elements) return;
+          
+          // Check if CURRENT scene has blocking BRANCHING components
+          var hasBlockingBranching = sceneElement.content.elements.some(function(elId) {
+            var element = draft.text_draft.visual.elements[elId];
+            if (!element || element.type !== 'interactive') return false;
+            
+            var content = element.content;
+            // Check for BRANCHING button component specifically
+            if (content.interactivity_type === 'component' && 
+                content.component_id === 'interactive_branching_button' &&
+                content.base_props && content.base_props.blockVideo === true) {
+              return true;
+            }
+            // Check for old branching component
+            if (content.interactivity_type === 'branching' && content.block_video === true) {
+              return true;
+            }
+            // DON'T match other button types (link buttons, etc.)
+            return false;
+          });
+          
+          if (hasBlockingBranching && sceneTimelineMap[sceneId]) {
+            var sceneEndTimeGlobal = sceneTimelineMap[sceneId].end;
+            
+            // For accurate pause: use min(current scene end, next scene start)
+            var pauseTimeGlobal = sceneEndTimeGlobal;
+            var nextSceneId = segment.sceneIds[index + 1];
+            if (nextSceneId && sceneTimelineMap[nextSceneId]) {
+              pauseTimeGlobal = Math.min(sceneEndTimeGlobal, sceneTimelineMap[nextSceneId].start);
+            }
+            
+            // Convert global time to LOCAL segment time
+            var pauseTimeLocal = pauseTimeGlobal - segmentGlobalStart;
+            
+            scenesToPause.push({
+              sceneId: sceneId,
+              pauseTime: pauseTimeLocal,  // Use LOCAL time for video.currentTime comparison
+              pauseTimeGlobal: pauseTimeGlobal,  // Keep for debugging
+              segmentId: segment.segmentId
+            });
+            console.log('[SCENE-PAUSE] Will pause at end of scene', sceneId, 'at LOCAL time', pauseTimeLocal.toFixed(3), '(global:', pauseTimeGlobal.toFixed(3) + ')');
+          }
+        });
+      });
+      
+      if (scenesToPause.length === 0) {
+        console.log('[SCENE-PAUSE] No scenes with blocking components found');
+        return;
+      }
+      
+      console.log('[SCENE-PAUSE] Found', scenesToPause.length, 'pause points');
+      
+      // ========================================
+      // FEATURE FLAG: Custom Pause Controller
+      // Set to false to let SDK handle all pausing
+      // ========================================
+      var ENABLE_CUSTOM_PAUSE = false;  // ✅ Disabled by default - SDK handles pausing
+      
+      if (!ENABLE_CUSTOM_PAUSE) {
+        console.log('[SCENE-PAUSE] Custom pause controller disabled - SDK handles all pausing');
+        return;  // Skip pause control setup, but keep calculations above
+      }
+      
+      // ========================================
+      // CENTRALIZED PAUSE CONTROLLER
+      // Single source of truth for pause/play decisions
+      // ========================================
+      var PauseController = {
+        // State
+        scenesToPause: scenesToPause,
+        pausedScenes: new Set(),
+        isSeeking: false,
+        rafId: null,
+        seekGracePeriodEnd: 0,  // Timestamp when grace period ends
+        
+        // Check if we should pause at current time
+        shouldPauseNow: function() {
+          if (video.paused || this.isSeeking) return false;
+          
+          // Grace period after seeking - don't pause for 200ms
+          if (Date.now() < this.seekGracePeriodEnd) return false;
+          
+          // Don't pause if SDK is handling a blocking component
+          // (SDK pauses ~100ms before component endTime for blockVideo)
+          if (this.isSDKHandlingPause()) return false;
+          
+          var currentTime = video.currentTime;
+          var currentSegmentId = window.currentSegmentId;
+          
+          for (var i = 0; i < this.scenesToPause.length; i++) {
+            var scene = this.scenesToPause[i];
+            
+            // Only check scenes in current segment
+            if (scene.segmentId !== currentSegmentId) continue;
+            
+            // Skip if already handled
+            if (this.pausedScenes.has(scene.sceneId)) continue;
+            
+            // Check if we're at pause point (scene end)
+            if (currentTime >= scene.pauseTime && currentTime <= scene.pauseTime + 0.03) {
+              return scene;
+            }
+          }
+          
+          return false;
+        },
+        
+        // Check if SDK is currently handling a pause for blocking component
+        isSDKHandlingPause: function() {
+          // If video was just paused in the last 100ms, assume SDK did it
+          if (this.lastSDKPauseTime && Date.now() - this.lastSDKPauseTime < 100) {
+            return true;
+          }
+          return false;
+        },
+        
+        // Track when SDK pauses happen
+        lastSDKPauseTime: 0,
+        
+        // Execute pause (ONLY place video.pause() is called for scene boundaries)
+        doPause: function(scene) {
+          console.log('[PAUSE-CTRL] Pausing at scene:', scene.sceneId, 'LOCAL:', video.currentTime.toFixed(3), 'target:', scene.pauseTime.toFixed(3));
+          video.pause();
+          this.pausedScenes.add(scene.sceneId);
+          this.stopRAF();
+          // Mark this as OUR pause, not SDK's
+          this.lastSDKPauseTime = 0;
+        },
+        
+        // Clear pause state (called on user interactions)
+        clearPauseState: function(reason) {
+          console.log('[PAUSE-CTRL] Clearing pause state -', reason);
+          this.pausedScenes.clear();
+        },
+        
+        // RAF loop for high-accuracy checking
+        checkLoop: function() {
+          var scene = this.shouldPauseNow();
+          if (scene) {
+            this.doPause(scene);
+            return;
+          }
+          
+          this.rafId = requestAnimationFrame(this.checkLoop.bind(this));
+        },
+        
+        startRAF: function() {
+          if (!this.rafId && !video.paused) {
+            this.rafId = requestAnimationFrame(this.checkLoop.bind(this));
+          }
+        },
+        
+        stopRAF: function() {
+          if (this.rafId) {
+            cancelAnimationFrame(this.rafId);
+            this.rafId = null;
+          }
+        },
+        
+        // Setup all event listeners
+        init: function() {
+          var self = this;
+          
+          console.log('[PAUSE-CTRL] Initialized with', this.scenesToPause.length, 'pause points');
+          
+          // Start RAF when video plays
+          video.addEventListener('play', function() {
+            self.startRAF();
+          });
+          
+          // Stop RAF when video pauses
+          video.addEventListener('pause', function() {
+            self.stopRAF();
+            // Track pause time to detect SDK-initiated pauses
+            self.lastSDKPauseTime = Date.now();
+          });
+          
+          // Handle seeking
+          video.addEventListener('seeking', function() {
+            self.isSeeking = true;
+            self.clearPauseState('seeking');
+          });
+          
+          video.addEventListener('seeked', function() {
+            self.isSeeking = false;
+            // Set grace period: don't check for pauses for 200ms after seek
+            // This allows SDK to resume video before we check for pauses
+            self.seekGracePeriodEnd = Date.now() + 200;
+            console.log('[PAUSE-CTRL] Seek completed - 200ms grace period for video resume');
+          });
+          
+          // Clear tracking on page reload
+          window.addEventListener('beforeunload', function() {
+            self.pausedScenes.clear();
+          });
+        }
+      };
+      
+      // Initialize the pause controller
+      PauseController.init();
+      
+      // Expose for SDK event handlers to clear state
+      window.sceneBoundaryPauseData = {
+        clearPauseState: function(reason) {
+          PauseController.clearPauseState(reason);
+        },
+        // Legacy compatibility
+        pausedScenes: PauseController.pausedScenes
+      };
+    }
+    
+    // Wait for runtime data hydration before initializing interactive runtime.
+    var runtimeFetch = typeof window.fetchScormRuntimeData === 'function' ? window.fetchScormRuntimeData() : Promise.resolve(false);
+    runtimeFetch.finally(function() {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializeInteractiveVideo);
+      } else {
+        initializeInteractiveVideo();
+      }
+    });
+  })();
+</script>
+</body>
+</html>
