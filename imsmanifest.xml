@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="scorm_643e6fca7b6e431c87b0af2cc40bc1d0" version="1.0"
+<manifest identifier="scorm_e84b0f2965f24b4f8f356f1294f7efcc" version="1.0"
           xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2"
           xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2"
           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -12,9 +12,9 @@
   </metadata>
   <organizations default="curso_organizacion">
     <organization identifier="curso_organizacion">
-      <title>SQL Essentials for Data Science</title>
+      <title> ALGORITHMIC THINKING</title>
       <item identifier="video_item" identifierref="recurso_video">
-        <title>SQL Essentials for Data Science</title>
+        <title> ALGORITHMIC THINKING</title>
         <adlcp:masteryscore>100</adlcp:masteryscore>
       </item>
     </organization>
